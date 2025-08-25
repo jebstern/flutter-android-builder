@@ -1,17 +1,13 @@
 # -----------------------------
-# Optimized Flutter + Android Builder Dockerfile
+# Base image
 # -----------------------------
-
 FROM ubuntu:22.04
 
-# -----------------------------
-# Environment Variables
-# -----------------------------
+# Environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-ENV PATH=$JAVA_HOME/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH
-ENV PATH=/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:$PATH
+ENV PATH=$JAVA_HOME/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:$PATH
 
 # -----------------------------
 # Install required packages
@@ -33,35 +29,18 @@ RUN apt-get update && \
 RUN git clone https://github.com/flutter/flutter.git /opt/flutter -b stable && \
     chmod +x /opt/flutter/bin/flutter
 
-# -----------------------------
-# Flutter pre-cache
-# -----------------------------
-# Pre-download Flutter engine artifacts for Android to speed up builds
-RUN flutter precache --android --linux
+RUN flutter precache --android
+RUN flutter doctor -v
 
 # -----------------------------
-# Pre-cache Flutter packages for all projects
-# -----------------------------
-# Creates a pub cache layer that can be reused in CI
-RUN mkdir -p /workspace && \
-    cd /workspace && \
-    flutter create temp_project && \
-    cd temp_project && \
-    flutter pub get
-
-# -----------------------------
-# Install Android Command Line Tools
+# Android Command line tools
 # -----------------------------
 RUN mkdir -p $ANDROID_SDK_ROOT/cmdline-tools && \
     cd $ANDROID_SDK_ROOT/cmdline-tools && \
     wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip && \
-    unzip cmdline-tools.zip && \
-    rm cmdline-tools.zip && \
+    unzip cmdline-tools.zip && rm cmdline-tools.zip && \
     mv cmdline-tools latest
 
-# -----------------------------
-# Accept licenses & install SDK packages
-# -----------------------------
 RUN yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses && \
     sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
         "platform-tools" \
@@ -76,21 +55,45 @@ RUN yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses && \
         "cmake;3.22.1"
 
 # -----------------------------
-# Pre-cache Gradle wrapper & dependencies
+# Pre-download Gradle distribution
 # -----------------------------
-# Gradle wrapper will be cached in Docker layers
-RUN mkdir -p /workspace/android_project && \
-    cd /workspace/android_project && \
-    mkdir -p android && \
-    echo "apply plugin: 'com.android.application'" > android/build.gradle && \
-    ./gradlew wrapper || true  # ignore if wrapper fails
+RUN mkdir -p /root/.gradle/wrapper/dists && \
+    wget https://services.gradle.org/distributions/gradle-8.14.3-all.zip -O /tmp/gradle.zip && \
+    mkdir -p /root/.gradle/wrapper/dists/gradle-8.14.3-all && \
+    unzip -q /tmp/gradle.zip -d /root/.gradle/wrapper/dists/gradle-8.14.3-all/ && \
+    rm /tmp/gradle.zip
 
 # -----------------------------
-# Verify installation
+# Pre-cache Flutter packages
 # -----------------------------
-RUN flutter doctor -v
+RUN mkdir -p /workspace && \
+    cd /workspace && \
+    flutter create temp_project && \
+    cd temp_project && \
+    flutter pub get && \
+    cd / && rm -rf /workspace/temp_project
 
 # -----------------------------
-# Set working directory
+# Pre-cache Gradle wrapper + dependencies
 # -----------------------------
-WORKDIR /workspace
+# Minimal dummy Android project to warm up Gradle caches
+RUN mkdir -p /workspace/android_warmup && \
+    cd /workspace/android_warmup && \
+    mkdir -p app && \
+    echo "plugins { \
+          id 'com.android.application' \
+          id 'org.jetbrains.kotlin.android' \
+          id 'com.google.gms.google-services' \
+          id 'com.google.firebase.crashlytics' \
+          }" > build.gradle.kts && \
+    echo "android { compileSdk = 34 }" >> build.gradle.kts && \
+    echo "dependencies { implementation(\"org.jetbrains.kotlin:kotlin-stdlib:1.9.25\") }" >> build.gradle.kts && \
+    echo "rootProject.name = \"warmup\"" > settings.gradle.kts && \
+    ./gradlew assembleDebug --no-daemon || true
+
+# -----------------------------
+# Clean up workspace (optional)
+# -----------------------------
+RUN rm -rf /workspace/android_warmup
+
+WORKDIR /
