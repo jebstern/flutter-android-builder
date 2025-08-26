@@ -1,99 +1,76 @@
-# -----------------------------
-# Base image
-# -----------------------------
 FROM ubuntu:22.04
 
-# Environment variables
-ENV DEBIAN_FRONTEND=noninteractive
-ENV ANDROID_SDK_ROOT=/opt/android-sdk
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-ENV PATH=$JAVA_HOME/bin:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:$PATH
-
 # -----------------------------
-# Install required packages
+# Basic tools
 # -----------------------------
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        openjdk-17-jdk \
-        wget \
-        unzip \
-        git \
-        curl \
-        xz-utils \
-        zip \
-        && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    curl unzip git xz-utils zip libglu1-mesa openjdk-17-jdk nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------
 # Install Flutter
 # -----------------------------
-RUN git clone https://github.com/flutter/flutter.git /opt/flutter -b stable && \
-    chmod +x /opt/flutter/bin/flutter
+ENV FLUTTER_VERSION=3.35.1
+ENV FLUTTER_HOME=/opt/flutter
+ENV PATH=$FLUTTER_HOME/bin:$PATH
 
-RUN flutter precache --android
-RUN flutter doctor -v
-
-# -----------------------------
-# Android Command line tools
-# -----------------------------
-RUN mkdir -p $ANDROID_SDK_ROOT/cmdline-tools && \
-    cd $ANDROID_SDK_ROOT/cmdline-tools && \
-    wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip && \
-    unzip cmdline-tools.zip && rm cmdline-tools.zip && \
-    mv cmdline-tools latest
-
-RUN yes | sdkmanager --sdk_root=$ANDROID_SDK_ROOT --licenses && \
-    sdkmanager --sdk_root=$ANDROID_SDK_ROOT \
-        "platform-tools" \
-        "platforms;android-31" \
-        "platforms;android-33" \
-        "platforms;android-34" \
-        "platforms;android-35" \
-        "platforms;android-36" \
-        "build-tools;33.0.2" \
-        "build-tools;35.0.0" \
-        "ndk;27.0.12077973" \
-        "cmake;3.22.1"
+RUN git clone https://github.com/flutter/flutter.git -b $FLUTTER_VERSION $FLUTTER_HOME \
+    && flutter doctor -v
 
 # -----------------------------
-# Pre-download Gradle distribution
+# Install Android SDK
 # -----------------------------
-RUN mkdir -p /root/.gradle/wrapper/dists && \
-    wget https://services.gradle.org/distributions/gradle-8.14.3-all.zip -O /tmp/gradle.zip && \
-    mkdir -p /root/.gradle/wrapper/dists/gradle-8.14.3-all && \
-    unzip -q /tmp/gradle.zip -d /root/.gradle/wrapper/dists/gradle-8.14.3-all/ && \
-    rm /tmp/gradle.zip
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+
+RUN mkdir -p $ANDROID_HOME/cmdline-tools \
+    && curl -s https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o cmdline-tools.zip \
+    && unzip cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools \
+    && mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest \
+    && rm cmdline-tools.zip \
+    && yes | sdkmanager --licenses
+
+RUN sdkmanager "platform-tools" \
+    "platforms;android-31" \
+    "platforms;android-33" \
+    "platforms;android-34" \
+    "platforms;android-35" \
+    "platforms;android-36" \
+    "build-tools;33.0.2" \
+    "build-tools;35.0.0" \
+    "ndk;27.0.12077973" \
+    "cmake;3.22.1"
 
 # -----------------------------
-# Pre-cache Flutter packages
+# Install Gradle (system-wide, avoid wrapper downloads)
 # -----------------------------
-RUN mkdir -p /workspace && \
-    cd /workspace && \
-    flutter create temp_project && \
-    cd temp_project && \
-    flutter pub get && \
-    cd / && rm -rf /workspace/temp_project
+ENV GRADLE_VERSION=8.14.3
+ENV GRADLE_HOME=/opt/gradle
+ENV PATH=$GRADLE_HOME/bin:$PATH
+
+RUN curl -sL https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-all.zip -o /opt/gradle-${GRADLE_VERSION}-all.zip \
+    && unzip /opt/gradle-${GRADLE_VERSION}-all.zip -d /opt \
+    && mv /opt/gradle-${GRADLE_VERSION} $GRADLE_HOME \
+    && rm /opt/gradle-${GRADLE_VERSION}-all.zip
 
 # -----------------------------
-# Pre-cache Gradle wrapper + dependencies
+# Prepare Gradle (copy real Gradle files from repo)
 # -----------------------------
-# Minimal dummy Android project to warm up Gradle caches
-RUN mkdir -p /workspace/android_warmup && \
-    cd /workspace/android_warmup && \
-    mkdir -p app && \
-    echo "plugins { \
-          id 'com.android.application' \
-          id 'org.jetbrains.kotlin.android' \
-          id 'com.google.gms.google-services' \
-          id 'com.google.firebase.crashlytics' \
-          }" > build.gradle.kts && \
-    echo "android { compileSdk = 34 }" >> build.gradle.kts && \
-    echo "dependencies { implementation(\"org.jetbrains.kotlin:kotlin-stdlib:1.9.25\") }" >> build.gradle.kts && \
-    echo "rootProject.name = \"warmup\"" > settings.gradle.kts && \
-    ./gradlew assembleDebug --no-daemon || true
+WORKDIR /workspace/android
+
+COPY android/settings.gradle.kts ./settings.gradle.kts
+COPY android/build.gradle.kts ./build.gradle.kts
+COPY android/gradle.properties ./gradle.properties
+COPY android/gradle ./gradle
+COPY android/app/build.gradle.kts ./app/build.gradle.kts
+
+# Force Gradle wrapper to use local Gradle instead of downloading
+RUN sed -i "s#distributionUrl=.*#distributionUrl=file:///opt/gradle/gradle-${GRADLE_VERSION}-all.zip#g" gradle/wrapper/gradle-wrapper.properties
+
+# Warm-up Gradle (download AGP, Kotlin, Firebase, etc.)
+RUN ./gradlew help --no-daemon || true
 
 # -----------------------------
-# Clean up workspace (optional)
+# Final workdir
 # -----------------------------
-RUN rm -rf /workspace/android_warmup
-
-WORKDIR /
+WORKDIR /workspace
